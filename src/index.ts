@@ -521,7 +521,7 @@ class Log {
         }
     }
 
-    private static getErrorObject() {
+    private static getErrorObject(): any {
         try { throw Error("") } catch (err) { return err; }
     }
 
