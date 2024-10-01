@@ -1,11 +1,11 @@
 {
   "name": "wa-log",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "<WA> TypeScript log management library",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "repository": {
-    "url": "https://github.com/awolf1/wa-log",
+    "url": "git+https://github.com/awolf1/wa-log.git",
     "type": "git"
   },
   "files": [
