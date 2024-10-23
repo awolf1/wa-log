@@ -4,7 +4,7 @@ OR
 
 ## Import the Lib
 ```
-import Log, { LogData, LogLevel } from ".";
+import { Log, LogData, LogLevel } from "wa-log";
 ```
 
 ## Get events

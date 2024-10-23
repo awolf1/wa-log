@@ -1,5 +1,6 @@
-import Log, { LogData, LogLevel } from ".";
+import {Log,  LogData, LogLevel } from ".";
 
+Log.setLevel(0, 0);
 
 Log.onEvent("ANY", (log: LogData) => {
     console.log("log ANY:", log.message);

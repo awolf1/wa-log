@@ -537,5 +537,4 @@ class LogInit extends Log {
 LogInit.init();
 
 
-export default Log;
-export { LogData, LogLevel };
+export { Log, LogData, LogLevel };
