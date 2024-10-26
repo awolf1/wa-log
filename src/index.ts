@@ -85,6 +85,7 @@ class Log {
 
     private static consolePrint = true;
     private static pathPrint = true;
+    private static filePrint = true;
     private static objectPrint = false;
 
     private static _trace = console.trace;
@@ -99,11 +100,19 @@ class Log {
     //#################################################################### Public - setter
 
     /**
-     * Set if the log will print the path or not.
+     * Set if the log will print the path and cursor or not.
      * @param print - Can print the path
      */
     public static setPathPrint(print: boolean) {
         Log.pathPrint = print;
+    }
+
+    /**
+     * Set if the log will print the filename and cursor or not.
+     * @param print - Can print just filename
+     */
+    public static setFilePrint(print: boolean) {
+        Log.filePrint = print;
     }
 
     /**
@@ -286,7 +295,7 @@ class Log {
      * @param object - The optional object to include into log message
      */
     public static log(name: string, message: string, object?: any) {
-        Log.run(Log.generate(LogLevel.DEBUG, name, message, object));
+        Log.run(Log.generate(LogLevel.LOG, name, message, object));
     }
 
     /**
@@ -511,7 +520,7 @@ class Log {
                 [ld.localDate.toISOString().slice(0, 23).replace("T", " ") + " ",
                 bg[ld.severity] + ("_" + LogLevel[ld.severity] + "_" + "\x1b[0m").padEnd(13),
                 ("[" + ld.name + "]").padEnd(15),
-                (Log.pathPrint ? (ld.local + ":" + ld.cursor).padEnd(65) : ""),
+                (Log.pathPrint ? (ld.local + ":" + ld.cursor).padEnd(65) : (Log.filePrint ? (ld.local.split(/[/\\]/).pop() + ":" + ld.cursor).padEnd(20) : "")),
                 (ld?.message ?? "-").padEnd(30),
                 (printObj ? ld.object : "")
                 ]);

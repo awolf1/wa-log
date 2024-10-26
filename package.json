@@ -1,6 +1,6 @@
 {
   "name": "wa-log",
-  "version": "1.9.3",
+  "version": "1.10.0",
   "description": "<WA> TypeScript log management library",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +13,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "gitpush": "git add . && git commit --allow-empty-message -m '' && git push origin master"
+    "gitpush": "git add . && git commit --allow-empty-message -m '' && git push origin master",
+    "produce": "npm run gitpush && npm run build && npm publish"
   },
   "author": "augusto.wolf <augusto.wolf@wa.eng.br>",
   "license": "ISC",
