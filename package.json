@@ -1,24 +1,33 @@
 {
   "name": "wa-log",
-  "version": "1.10.0",
+  "version": "2.0.0",
   "description": "<WA> TypeScript log management library",
+  "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "repository": {
     "url": "git+https://github.com/awolf1/wa-log.git",
     "type": "git"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc",
+    "sample": "tsx src/sample.ts",
+    "test": "npm run build && node test/run.js",
+    "prepare": "npm run build",
     "gitpush": "git add . && git commit --allow-empty-message -m '' && git push origin master",
-    "produce": "npm run gitpush && npm run build && npm publish"
+    "produce": "npm test && npm run gitpush && npm publish"
   },
   "author": "augusto.wolf <augusto.wolf@wa.eng.br>",
   "license": "ISC",
   "devDependencies": {
-    "@types/node": "^22.7.4"
+    "@types/node": "^24.13.3",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
   }
 }
