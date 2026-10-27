@@ -5,6 +5,53 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/).
 
+## [2.1.0]
+
+Version 2.1.0 makes retention hold during the day when rotation is enabled, without
+adding any blocking work to the logging path.
+
+### Added
+
+- Added `Log.purgeAsync()`, which applies the retention rules with asynchronous
+  filesystem calls and resolves with the number of files removed. It never rejects,
+  runs one pass at a time, and a call made during a pass joins it and schedules one
+  more pass after it.
+- Added retention by file count through `Log.setPurgeFiles(count)` and the
+  `WA_LOG_PURGE_FILES` environment variable. The file being written counts toward
+  the limit and is never deleted.
+
+### Changed
+
+- Automatic retention passes, on the first write, on a directory change, and on a
+  day change, now run in the background through `purgeAsync` instead of
+  synchronously inside the log call that triggered them. `Log.purge()`,
+  `setPurgeDays`, `setPurgeSize`, and `setPurgeFiles` remain synchronous and keep
+  returning the number of files removed.
+
+### Fixed
+
+- Retention now also runs when rotation opens a new part. Previously
+  `setPurgeSize` was only enforced at midnight, so a busy day could grow the
+  directory well beyond its budget.
+- The rotation limit is now measured in UTF-8 bytes instead of string characters.
+  Accented or wide characters made parts larger than the configured size.
+- A part no longer overflows the limit when the next record does not fit in the room
+  left; the record opens the next part. Only a record larger than the whole limit
+  still exceeds it, alone in its own part.
+
+### Performance
+
+- The log call that triggers a retention pass no longer lists and stats the log
+  directory. With 5,000 files in the directory, that call went from about 35 ms to
+  under 2 ms in local measurements.
+
+### Tests
+
+- Added coverage for `purgeAsync`, the file-count rule, retention triggered by
+  rotation, `WA_LOG_PURGE_FILES`, multibyte rotation limits, and oversized records.
+- Updated the environment retention tests to check that the first write no longer
+  purges inline and that the background pass completes before the process exits.
+
 ## [2.0.0]
 
 Version 2.0.0 preserves the basic 1.x logging API while substantially improving

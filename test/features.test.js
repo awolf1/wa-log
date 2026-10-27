@@ -87,6 +87,55 @@ function child(source, env, dir) {
     fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// the limit is a size in bytes: accented and wide characters take more than one
+{
+    const dir = box();
+    Log.setDir(dir);
+    Log.setLevel(LogLevel.FATAL, LogLevel.TRACE);
+    Log.setRotateSize(4000);
+
+    const text = "ação, coração e informação ✓ 日本語 🚀";
+    for (let i = 0; i < 60; i++) Log.info("UTF", text + " " + i);
+    Log.flush();
+
+    const files = logFiles(dir);
+    const sizes = files.map(n => fs.statSync(path.join(dir, n)).size);
+    check("multibyte content rotates too", files.length > 1, files.join(","));
+    check("no part passes the limit in bytes", sizes.every(s => s <= 4000), sizes.join(","));
+
+    const lines = bodyOf(dir).split("\r\n").filter(Boolean);
+    let intact = 0;
+    for (const l of lines) { try { if (JSON.parse(l).message.startsWith(text)) intact++; } catch (e) { } }
+    check("every multibyte line survives the cut", intact === 60, intact + " of 60");
+
+    Log.setRotateSize(0);
+    fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// a line larger than the whole limit gets a part of its own instead of overflowing another
+{
+    const dir = box();
+    Log.setDir(dir);
+    Log.setLevel(LogLevel.FATAL, LogLevel.TRACE);
+    Log.setStackDepth(1);
+    Log.setRotateSize(1000);
+
+    Log.info("BIG", "before");
+    Log.info("BIG", "huge", { blob: "x".repeat(3000) });
+    Log.info("BIG", "after");
+    Log.flush();
+
+    const parts = logFiles(dir).map(n => fs.readFileSync(path.join(dir, n), "utf8").split("\r\n").filter(Boolean));
+    const holder = parts.find(p => p.some(l => l.includes('"huge"')));
+    check("an oversized line goes out whole", holder && JSON.parse(holder.find(l => l.includes('"huge"'))).object.blob.length === 3000);
+    check("and alone in its part", holder && holder.length === 1, holder ? holder.length + " lines" : "missing");
+    check("nothing around it was lost", lineCount(dir) === 3, String(lineCount(dir)));
+
+    Log.setStackDepth(0);
+    Log.setRotateSize(0);
+    fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ---------------------------------------------------------------- repeats
 {
     const dir = box();

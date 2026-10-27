@@ -136,6 +136,14 @@ class Log {
     // Both off by default: deleting somebody's logs is never a default.
     private static purgeDays = 0;
     private static purgeBytes = 0;
+    private static purgeFiles = 0;
+
+    // The automatic purge runs off the logging path: a directory listing plus a stat
+    // per file is far too much to pay inside a log call. One pass at a time, and a
+    // trigger that lands during a pass asks for one more instead of starting another.
+    private static purgeTask: Promise<number> = null;
+    private static purgeAgain = false;
+    private static purgeScheduled = false;
 
     // Flood guards, both off by default: they change what ends up in the file.
     private static collapseRepeats = false;
@@ -304,6 +312,18 @@ class Log {
      */
     public static setPurgeSize(bytes: number): number {
         Log.purgeBytes = (typeof bytes === "number" && bytes > 0) ? Math.floor(bytes) : 0;
+        return Log.purge();
+    }
+
+    /**
+     * Keeps at most this many log files in the directory, the current one included,
+     * deleting the oldest first. 0, the default, keeps everything. Combined with
+     * setRotateSize it bounds the directory the way `rotate N` does in logrotate.
+     * @param count Maximum number of log files. Use `0` to disable this rule.
+     * @returns Number of files removed by the immediate retention pass.
+     */
+    public static setPurgeFiles(count: number): number {
+        Log.purgeFiles = (typeof count === "number" && count > 0) ? Math.floor(count) : 0;
         return Log.purge();
     }
 
@@ -619,6 +639,9 @@ class Log {
 
         const size = Log.parseSize(env.WA_LOG_PURGE_SIZE);
         if (size != null) Log.purgeBytes = size;
+
+        const files = Number(env.WA_LOG_PURGE_FILES);
+        if (Number.isInteger(files) && files > 0) Log.purgeFiles = files;
 
         const rotate = Log.parseSize(env.WA_LOG_ROTATE_SIZE);
         if (rotate != null) Log.rotateBytes = rotate;
@@ -937,63 +960,51 @@ class Log {
     }
 
     /**
-     * Applies the retention rules. Runs by itself when a rule is set, when the
-     * directory changes and when the day rolls over, so nothing is left ticking in
-     * the background. Safe to call by hand.
+     * Applies the retention rules right away, blocking until they are done. The
+     * automatic passes, when the directory changes, when the day rolls over and
+     * when rotation opens a new part, go through purgeAsync instead and never
+     * hold up a log call. Safe to call by hand.
      * @returns Number of files deleted.
      */
     public static purge(): number {
-        if (Log.purgeDays <= 0 && Log.purgeBytes <= 0) return 0;
+        if (!Log.purgeEnabled()) return 0;
 
         let removed = 0;
         try {
-            if (!Log.dir || !fs.existsSync(Log.dir)) return 0;
+            const dir = Log.dir;
+            if (!dir || !fs.existsSync(dir)) return 0;
 
-            const today = Log.dayOf(new Date()).getTime();
-            const names = fs.readdirSync(Log.dir);
-
-            let total = 0;
-            const older: Array<{ path: string, day: number, part: number, size: number }> = [];
+            const names = fs.readdirSync(dir);
+            const found: Array<{ path: string, day: number, part: number, size: number }> = [];
 
             for (let i = 0; i < names.length; i++) {
                 // only files this library writes; anything else in the directory is not ours
                 const parsed = Log.parseLogName(names[i]);
                 if (parsed === null) continue;
 
-                const full = path.resolve(Log.dir, names[i]);
-                let size = 0;
+                const full = path.resolve(dir, names[i]);
                 try {
                     const stat = fs.statSync(full);
                     if (!stat.isFile()) continue;
-                    size = stat.size;
+                    found.push({ path: full, day: parsed.day.getTime(), part: parsed.part, size: stat.size });
                 } catch (e) {
                     continue;
                 }
-
-                total += size;
-
-                // the file being written stays, whatever the rules say. Earlier parts of
-                // today are closed already, so the size rule may still reclaim them.
-                if (full === Log.filePath || (parsed.day.getTime() === today && parsed.part === Log.filePart)) continue;
-
-                older.push({ path: full, day: parsed.day.getTime(), part: parsed.part, size: size });
             }
 
-            older.sort((a, b) => (a.day - b.day) || (a.part - b.part));
+            const plan = Log.purgePlan(found);
+            let total = plan.total;
+            let count = plan.count;
 
-            // date arithmetic, not a multiplication: it has to survive daylight saving
-            const now = new Date();
-            const cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (Log.purgeDays - 1)).getTime();
-
-            for (let i = 0; i < older.length; i++) {
-                const tooOld = Log.purgeDays > 0 && older[i].day < cutoff;
-                const tooBig = Log.purgeBytes > 0 && total > Log.purgeBytes;
-                if (!tooOld && !tooBig) continue;
+            for (let i = 0; i < plan.older.length; i++) {
+                const file = plan.older[i];
+                if (!Log.purgeDue(file.day, total, count, plan.cutoff)) continue;
 
                 try {
-                    if (older[i].path === Log.fdFile) Log.closeFile();
-                    fs.unlinkSync(older[i].path);
-                    total -= older[i].size;
+                    if (file.path === Log.fdFile) Log.closeFile();
+                    fs.unlinkSync(file.path);
+                    total -= file.size;
+                    count--;
                     removed++;
                 } catch (e) {
 
@@ -1003,6 +1014,164 @@ class Log {
 
         }
         return removed;
+    }
+
+    /**
+     * Applies the retention rules without blocking the process: the directory is
+     * walked with one filesystem call at a time, so the pass never holds more than
+     * one thread of the libuv pool the application shares with dns, crypto and zlib.
+     * A call made while a pass is running joins it, and one more pass follows so
+     * the rules and the files are seen as they are at the time of the call.
+     * @returns Promise with the number of files deleted. It never rejects.
+     */
+    public static purgeAsync(): Promise<number> {
+        if (Log.purgeTask !== null) {
+            Log.purgeAgain = true;
+            return Log.purgeTask;
+        }
+        Log.purgeTask = Log.purgeLoop();
+        return Log.purgeTask;
+    }
+
+    private static async purgeLoop(): Promise<number> {
+        let removed = 0;
+        try {
+            do {
+                Log.purgeAgain = false;
+                removed += await Log.purgePass();
+            } while (Log.purgeAgain);
+        } catch (e) {
+
+        } finally {
+            // cleared in the same step that saw no rerun asked for, so a call made
+            // right after never joins a pass that is already over
+            Log.purgeTask = null;
+        }
+        return removed;
+    }
+
+    private static async purgePass(): Promise<number> {
+        if (!Log.purgeEnabled()) return 0;
+
+        let removed = 0;
+        try {
+            const dir = Log.dir;
+            if (!dir) return 0;
+
+            let names: Array<string>;
+            try {
+                names = await fs.promises.readdir(dir);
+            } catch (e) {
+                return 0;
+            }
+
+            const found: Array<{ path: string, day: number, part: number, size: number }> = [];
+            for (let i = 0; i < names.length; i++) {
+                const parsed = Log.parseLogName(names[i]);
+                if (parsed === null) continue;
+
+                const full = path.resolve(dir, names[i]);
+                try {
+                    const stat = await fs.promises.stat(full);
+                    if (!stat.isFile()) continue;
+                    found.push({ path: full, day: parsed.day.getTime(), part: parsed.part, size: stat.size });
+                } catch (e) {
+                    continue;
+                }
+            }
+
+            const plan = Log.purgePlan(found);
+            let total = plan.total;
+            let count = plan.count;
+
+            for (let i = 0; i < plan.older.length; i++) {
+                // the directory changed under the pass; the pass that change asked for covers the new one
+                if (Log.dir !== dir) break;
+
+                const file = plan.older[i];
+                if (!Log.purgeDue(file.day, total, count, plan.cutoff)) continue;
+
+                // checked again right before deleting: the writer may have moved on to
+                // this very file while the pass was waiting on the disk
+                if (file.path === Log.fdFile || Log.purgeKeeps(file.path, file.day, file.part)) continue;
+
+                try {
+                    await fs.promises.unlink(file.path);
+                    total -= file.size;
+                    count--;
+                    removed++;
+                } catch (e) {
+
+                }
+            }
+        } catch (e) {
+
+        }
+        return removed;
+    }
+
+    /**
+     * Starts a background pass at the end of the tick. Not unref'd on purpose: a
+     * short script that logs once and exits still gets its retention applied, and
+     * the pass only waits on the disk, it never keeps the CPU busy.
+     */
+    private static schedulePurge() {
+        if (!Log.purgeEnabled()) return;
+        if (Log.purgeTask !== null) {
+            Log.purgeAgain = true;
+            return;
+        }
+        if (Log.purgeScheduled) return;
+        Log.purgeScheduled = true;
+        try {
+            setImmediate(() => {
+                Log.purgeScheduled = false;
+                Log.purgeAsync();
+            });
+        } catch (e) {
+            Log.purgeScheduled = false;
+        }
+    }
+
+    private static purgeEnabled(): boolean {
+        return Log.purgeDays > 0 || Log.purgeBytes > 0 || Log.purgeFiles > 0;
+    }
+
+    /**
+     * The file being written stays, whatever the rules say. Earlier parts of today
+     * are closed already, so the size and count rules may still reclaim them.
+     */
+    private static purgeKeeps(full: string, day: number, part: number): boolean {
+        return full === Log.filePath || (day === Log.dayOf(new Date()).getTime() && part === Log.filePart);
+    }
+
+    /** What a pass works with: the deletable files oldest first, and the totals the rules start from. */
+    private static purgePlan(found: Array<{ path: string, day: number, part: number, size: number }>) {
+        let total = 0;
+        const older: Array<{ path: string, day: number, part: number, size: number }> = [];
+
+        for (let i = 0; i < found.length; i++) {
+            // the kept file still counts, both toward the size budget and the file count
+            total += found[i].size;
+            if (Log.purgeKeeps(found[i].path, found[i].day, found[i].part)) continue;
+            older.push(found[i]);
+        }
+
+        older.sort((a, b) => (a.day - b.day) || (a.part - b.part));
+
+        // date arithmetic, not a multiplication: it has to survive daylight saving
+        const now = new Date();
+        const cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (Log.purgeDays - 1)).getTime();
+
+        return { older: older, total: total, count: found.length, cutoff: cutoff };
+    }
+
+    /** Whether the oldest file left has to go, given what the files before it already freed. */
+    private static purgeDue(day: number, total: number, count: number, cutoff: number): boolean {
+        if (Log.purgeDays > 0 && day < cutoff) return true;
+        if (Log.purgeBytes > 0 && total > Log.purgeBytes) return true;
+        if (Log.purgeFiles > 0 && count > Log.purgeFiles) return true;
+        return false;
     }
 
     private static salvar(ld: LogData) {
@@ -1062,7 +1231,7 @@ class Log {
             Log.filePart = Log.lastPartOf(day);
             Log.filePath = Log.partPath(day, Log.filePart);
             // first log of the process, a new directory, or midnight just passed
-            Log.purge();
+            Log.schedulePurge();
         }
         return Log.filePath;
     }
@@ -1130,8 +1299,10 @@ class Log {
     private static append(target: string, data: string) {
         try {
             // a batch is written in one call, so the rotation limit has to be applied
-            // inside it: a burst would otherwise land whole in the file it overflows
-            let remaining = data;
+            // inside it: a burst would otherwise land whole in the file it overflows.
+            // Measured in bytes, not characters: the limit is a file size, and every
+            // accented letter is two bytes on disk. writeSync would encode it anyway.
+            let remaining = Buffer.from(data, "utf8");
 
             while (remaining.length > 0) {
                 const now = Date.now();
@@ -1165,23 +1336,26 @@ class Log {
 
                 const rotating = Log.rotateBytes > 0 && target === Log.filePath;
 
-                // full: what is left of the batch belongs to the next part
-                if (rotating && Log.fdBytes >= Log.rotateBytes) {
+                let size = remaining.length;
+                if (rotating && Log.fdBytes + size > Log.rotateBytes) {
+                    size = Log.cutToFit(remaining, Log.rotateBytes - Log.fdBytes, Log.fdBytes === 0);
+                }
+
+                // full, or not even the next line fits: the rest belongs to the next part
+                if (rotating && size === 0) {
                     Log.filePart++;
                     Log.filePath = Log.partPath(Log.fileDay, Log.filePart);
                     target = Log.filePath;
+                    // a new part is what grows the directory during the day, so the
+                    // size and count rules have to be checked now, not at midnight
+                    Log.schedulePurge();
                     continue;
                 }
 
-                let slice = remaining;
-                if (rotating && Log.fdBytes + slice.length > Log.rotateBytes) {
-                    slice = Log.cutToFit(remaining, Log.rotateBytes - Log.fdBytes);
-                }
-                if (slice.length === 0) break;
-
-                fs.writeSync(Log.fd, slice);
-                Log.fdBytes += slice.length;
-                remaining = remaining.slice(slice.length);
+                const written = fs.writeSync(Log.fd, remaining, 0, size);
+                if (!(written > 0)) break;
+                Log.fdBytes += written;
+                remaining = remaining.subarray(written);
             }
         } catch (e) {
             // the next write starts over with a fresh handle
@@ -1191,14 +1365,20 @@ class Log {
 
     /**
      * As many whole lines as fit in the room left. A record is never split between two
-     * files, so a single line larger than the limit still goes out in one piece.
+     * files, so a single line larger than the limit still goes out in one piece, alone
+     * in a part of its own. Cutting the bytes is safe: CR and LF never occur inside a
+     * multibyte UTF-8 sequence.
+     * @param empty Whether the part is still empty, the only case a line may overflow it.
+     * @returns How many bytes from the start of the batch to write; 0 when the part is full.
      */
-    private static cutToFit(data: string, room: number): string {
-        const cut = room > 0 ? data.lastIndexOf("\r\n", room) : -1;
-        if (cut >= 0) return data.slice(0, cut + 2);
+    private static cutToFit(data: Buffer, room: number, empty: boolean): number {
+        // the search starts 2 bytes back so the line break itself still fits the room
+        const cut = room >= 2 ? data.lastIndexOf("\r\n", room - 2) : -1;
+        if (cut >= 0) return cut + 2;
+        if (!empty) return 0;
 
         const first = data.indexOf("\r\n");
-        return first < 0 ? data : data.slice(0, first + 2);
+        return first < 0 ? data.length : first + 2;
     }
 
     private static closeFile() {

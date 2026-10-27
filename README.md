@@ -9,7 +9,7 @@ Key features:
 - seven severity levels, from `TRACE` to `FATAL`;
 - independent console and file thresholds;
 - daily files with optional size-based rotation;
-- retention by age and total directory size;
+- retention by age, total directory size, and file count, applied in the background;
 - automatic capture of `console.trace`, `debug`, `log`, `info`, `warn`, and `error`;
 - persisted log querying and filtering;
 - sensitive-data redaction;
@@ -106,6 +106,7 @@ Log.setRedact(["password", "token", "authorization", "cookie"]);
 Log.setRotateSize(50 * 1024 * 1024);   // 50 MB per part
 Log.setPurgeDays(30);                  // keep 30 days
 Log.setPurgeSize(500 * 1024 * 1024);   // cap the directory at 500 MB
+Log.setPurgeFiles(100);                // and at 100 files
 Log.setCatchCrashes(true);
 
 Log.info("BOOT", "Application ready", { environment: process.env.NODE_ENV });
@@ -303,6 +304,14 @@ Without a limit, there is one file per day. With rotation enabled, subsequent pa
 are named `2026-08-18.1.log`, `2026-08-18.2.log`, and so on. A record is never split
 between files, and a restarted process continues after the highest existing part.
 
+The limit is measured in bytes as written to disk (UTF-8), so accented or wide
+characters count for what they actually take. A part is closed as soon as the next
+record would not fit; only a single record larger than the whole limit goes out
+alone, in a part of its own, exceeding it.
+
+Opening a new part also triggers the retention rules, so `setPurgeSize` and
+`setPurgeFiles` hold during the day instead of only after midnight.
+
 Pass `0` to disable rotation.
 
 ### Retention
@@ -310,15 +319,32 @@ Pass `0` to disable rotation.
 ```ts
 Log.setPurgeDays(30);
 Log.setPurgeSize(500 * 1024 * 1024);
+Log.setPurgeFiles(100);
 const removed = Log.purge();
+const removedLater = await Log.purgeAsync();
 ```
 
-The rules can be combined and run when configured, when the directory changes, and
-when the day changes. Only files matching `YYYY-MM-DD.log` or
+The rules can be combined; the oldest files go first, and a file is deleted when any
+rule asks for it. `setPurgeFiles` counts the file being written, so `setPurgeFiles(10)`
+keeps at most 10 files in the directory. Only files matching `YYYY-MM-DD.log` or
 `YYYY-MM-DD.N.log` are considered. The currently open file is never deleted.
 
-Pass `0` to disable either rule. `setPurgeDays`, `setPurgeSize`, and `purge` return
-the number of files removed by their immediate pass.
+The automatic passes run when the directory changes, when the day changes, and when
+rotation opens a new part. They never block a log call: the work is scheduled for
+the end of the tick and walks the directory with asynchronous filesystem calls, one
+at a time, so a pass never holds more than one thread of the libuv pool shared with
+the application. Only one pass runs at a time; a trigger during a pass schedules one
+more pass after it. A pass in progress finishes before the process exits on its own;
+`process.exit()` cuts it short, and the next start picks up the remaining work.
+
+`purgeAsync` runs a pass the same way and returns a `Promise` with the number of
+files removed. It never rejects. A call made while a pass is running joins it.
+
+`setPurgeDays`, `setPurgeSize`, `setPurgeFiles`, and `purge` run synchronously and
+return the number of files removed by their immediate pass. They are meant for
+startup or maintenance code; use `purgeAsync` anywhere latency matters.
+
+Pass `0` to disable any rule.
 
 ## API reference
 
@@ -367,9 +393,11 @@ where `catch` was called.
 | `setRotateSize(bytes)` | Sets the maximum size of a daily part; `0` disables rotation | `void` |
 | `setPurgeDays(days)` | Sets age-based retention; `0` disables the rule and runs a purge pass | `number` |
 | `setPurgeSize(bytes)` | Sets the directory size budget; `0` disables the rule and runs a purge pass | `number` |
+| `setPurgeFiles(count)` | Sets the maximum number of log files, the current one included; `0` disables the rule and runs a purge pass | `number` |
 | `setCatchCrashes(enabled)` | Installs or removes fatal process error handlers | `boolean` |
 | `flush()` | Immediately writes pending queues and counters | `void` |
-| `purge()` | Immediately applies the configured retention rules | `number` |
+| `purge()` | Immediately applies the configured retention rules, synchronously | `number` |
+| `purgeAsync()` | Applies the configured retention rules without blocking the process | `Promise<number>` |
 
 ### History and reading
 
@@ -489,6 +517,7 @@ precedence. Invalid values are ignored.
 | `WA_LOG_STACK_DEPTH` | integer greater than or equal to 1 | `setStackDepth` |
 | `WA_LOG_PURGE_DAYS` | integer greater than 0 | `setPurgeDays` |
 | `WA_LOG_PURGE_SIZE` | bytes, `KB`, `MB`, or `GB` | `setPurgeSize` |
+| `WA_LOG_PURGE_FILES` | integer greater than 0 | `setPurgeFiles` |
 | `WA_LOG_ROTATE_SIZE` | bytes, `KB`, `MB`, or `GB` | `setRotateSize` |
 | `WA_LOG_COLLAPSE_REPEATS` | boolean | `setCollapseRepeats` |
 | `WA_LOG_RATE_LIMIT` | integer greater than 0 | `setRateLimit` |
