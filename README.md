@@ -100,17 +100,20 @@ retention runs in the background afterward.
 flowchart TD
     subgraph call["1 · Inside the logging call"]
         A1["Log.trace … Log.fatal"] --> G["capture stack frames<br/>and build LogData"]
-        A2["Log.catch(error)"] --> G
-        A3["console.* (captured)"] --> NAT["native console<br/>when setConsolePrint(true)"]
-        A3 --> G
+        A2["Log.catch(error)<br/>and the setCatchCrashes handlers"] --> GC["build LogData,<br/>reusing the error's own stack"]
+        A3["console.* (captured)"] --> NAT["native console, when setConsolePrint(true)<br/>or inside an onEvent callback"]
+        A3 --> CREC{"inside an<br/>onEvent callback?"}
+        CREC -- no --> G
+        CREC -- yes --> IGN
 
-        G --> REC{"called from an<br/>onEvent callback?"}
+        G --> REC{"inside an<br/>onEvent callback?"}
+        GC --> REC
         REC -- yes --> IGN["ignored, prevents recursion"]
-        REC -- no --> RED["setRedact: masked copy<br/>of the payload"]
-        RED --> COL{"setCollapseRepeats:<br/>same as the previous record?"}
-        COL -- yes --> CNT1["counted; summary sent later<br/>as ... repeated N times"]
+        REC -- no --> RED["setRedact, when keys are set:<br/>masked copy of the payload"]
+        RED --> COL{"setCollapseRepeats:<br/>same level, name and message<br/>as the previous record?"}
+        COL -- yes --> CNT1["counted; a summary carrying the last<br/>payload goes out with the next different<br/>record, a flush, or process exit"]
         COL -- no --> RL{"setRateLimit:<br/>over the limit this second?"}
-        RL -- yes --> CNT2["counted; WARN with the<br/>dropped total next second"]
+        RL -- yes --> CNT2["counted; a WARN with the total goes out<br/>with the first record of a later second,<br/>a flush, or process exit"]
         RL -- no --> DEL(["deliver"])
 
         DEL --> MEM["in-memory history<br/>last 100, getLatestLogs()"]
@@ -119,19 +122,19 @@ flowchart TD
         DEL --> SAVE{"severity >= save level?"}
         SHOW -- yes --> CON["colored terminal line"]
         SAVE -- yes --> SET{"directory settled?"}
-        SET -- no --> PEND["startup buffer, up to 500,<br/>released by setDir or end of tick"]
+        SET -- no --> PEND["startup buffer, released by setDir,<br/>the end of the tick, or at 500 records"]
         SET -- yes --> SER["serialize to one JSON line"]
         PEND -.-> SER
-        SER --> DAY{"first write, new day<br/>or new directory?"}
-        DAY -- always --> QUE["write queue<br/>drained at once past 1 MB"]
+        SER --> DAY{"first write, new day, new directory,<br/>or setRotateSize called?"}
+        DAY -- always --> QUE["write queue"]
     end
 
     subgraph tick["2 · End of the tick"]
-        QUE --> DR["drain: one writeSync per file<br/>on a handle kept open"]
-        DR --> ROT{"part reached<br/>setRotateSize?"}
+        QUE -->|"end of the tick, or at once<br/>inside the call past 1 MB"| DR["drain: one batched write per file<br/>on a handle kept open"]
+        DR --> ROT{"setRotateSize: the next record<br/>does not fit in the part?"}
         ROT -- yes --> NP["continue in YYYY-MM-DD.N.log"]
         NP --> DR
-        EXIT["process exit"] -.->|"flush()"| DR
+        FL["flush(): process exit, getLogs, setDir,<br/>the crash handlers, or a direct call"] -.->|"pending summaries first"| DR
     end
 
     subgraph bg["3 · Background"]
@@ -144,7 +147,8 @@ flowchart TD
 ```
 
 - Records below both thresholds still reach the history and the listeners.
-- The repeat and rate-limit summaries go through `deliver` like any other record.
+- The repeat and rate-limit summaries go straight to `deliver`, without passing the
+  flood guards again; the repeat summary keeps the already masked payload.
 - Retention is only scheduled when at least one `setPurge*` rule is set.
 
 ## Use cases
