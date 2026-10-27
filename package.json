@@ -1,6 +1,6 @@
 {
   "name": "wa-log",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "<WA> TypeScript log management library",
   "type": "commonjs",
   "main": "dist/index.js",
@@ -16,6 +16,7 @@
     "dist"
   ],
   "scripts": {
+    "prebuild": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
     "sample": "tsx src/sample.ts",
     "test": "npm run build && node test/run.js",

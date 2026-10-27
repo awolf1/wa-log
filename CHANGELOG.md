@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/).
 
+## [2.1.1]
+
+### Changed
+
+- The published package no longer includes `dist/sample.js` and `dist/sample.d.ts`.
+  `src/sample.ts` is excluded from compilation and still runs with `npm run sample`.
+- `npm run build` now clears `dist` first, so files left over from earlier builds are
+  never published.
+
 ## [2.1.0]
 
 Version 2.1.0 makes retention hold during the day when rotation is enabled, without
