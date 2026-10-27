@@ -90,6 +90,63 @@ Log.setLevel(LogLevel.INFO, LogLevel.TRACE);
 Even when a record is below both console and file thresholds, it still enters the
 in-memory history and is delivered to event listeners.
 
+## How a record flows
+
+Every record goes through the same path, whichever API created it. Only the first
+stage runs inside the logging call; disk writes wait for the end of the tick, and
+retention runs in the background afterward.
+
+```mermaid
+flowchart TD
+    subgraph call["1 · Inside the logging call"]
+        A1["Log.trace … Log.fatal"] --> G["capture stack frames<br/>and build LogData"]
+        A2["Log.catch(error)"] --> G
+        A3["console.* (captured)"] --> NAT["native console<br/>when setConsolePrint(true)"]
+        A3 --> G
+
+        G --> REC{"called from an<br/>onEvent callback?"}
+        REC -- yes --> IGN["ignored, prevents recursion"]
+        REC -- no --> RED["setRedact: masked copy<br/>of the payload"]
+        RED --> COL{"setCollapseRepeats:<br/>same as the previous record?"}
+        COL -- yes --> CNT1["counted; summary sent later<br/>as ... repeated N times"]
+        COL -- no --> RL{"setRateLimit:<br/>over the limit this second?"}
+        RL -- yes --> CNT2["counted; WARN with the<br/>dropped total next second"]
+        RL -- no --> DEL(["deliver"])
+
+        DEL --> MEM["in-memory history<br/>last 100, getLatestLogs()"]
+        DEL --> SHOW{"severity >= show level?"}
+        DEL --> EV["onEvent listeners"]
+        DEL --> SAVE{"severity >= save level?"}
+        SHOW -- yes --> CON["colored terminal line"]
+        SAVE -- yes --> SET{"directory settled?"}
+        SET -- no --> PEND["startup buffer, up to 500,<br/>released by setDir or end of tick"]
+        SET -- yes --> SER["serialize to one JSON line"]
+        PEND -.-> SER
+        SER --> DAY{"first write, new day<br/>or new directory?"}
+        DAY -- always --> QUE["write queue<br/>drained at once past 1 MB"]
+    end
+
+    subgraph tick["2 · End of the tick"]
+        QUE --> DR["drain: one writeSync per file<br/>on a handle kept open"]
+        DR --> ROT{"part reached<br/>setRotateSize?"}
+        ROT -- yes --> NP["continue in YYYY-MM-DD.N.log"]
+        NP --> DR
+        EXIT["process exit"] -.->|"flush()"| DR
+    end
+
+    subgraph bg["3 · Background"]
+        SP["schedulePurge(): one pass at a time,<br/>a trigger during a pass asks for one more"]
+        SP --> PA["purgeAsync: readdir, stat each file,<br/>unlink oldest first while a rule asks;<br/>the open file is never deleted"]
+    end
+
+    DAY -- yes --> SP
+    NP --> SP
+```
+
+- Records below both thresholds still reach the history and the listeners.
+- The repeat and rate-limit summaries go through `deliver` like any other record.
+- Retention is only scheduled when at least one `setPurge*` rule is set.
+
 ## Use cases
 
 ### Production API or service
@@ -334,7 +391,7 @@ rotation opens a new part. They never block a log call: the work is scheduled fo
 the end of the tick and walks the directory with asynchronous filesystem calls, one
 at a time, so a pass never holds more than one thread of the libuv pool shared with
 the application. Only one pass runs at a time; a trigger during a pass schedules one
-more pass after it. A pass in progress finishes before the process exits on its own;
+more pass after it, as shown in [How a record flows](#how-a-record-flows). A pass in progress finishes before the process exits on its own;
 `process.exit()` cuts it short, and the next start picks up the remaining work.
 
 `purgeAsync` runs a pass the same way and returns a `Promise` with the number of

@@ -45,6 +45,11 @@ adding any blocking work to the logging path.
   directory. With 5,000 files in the directory, that call went from about 35 ms to
   under 2 ms in local measurements.
 
+### Documentation
+
+- Added a "How a record flows" section to the README with a Mermaid diagram of the
+  full path of a record, from the logging call to disk writes and background retention.
+
 ### Tests
 
 - Added coverage for `purgeAsync`, the file-count rule, retention triggered by
