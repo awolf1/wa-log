@@ -49,6 +49,8 @@ adding any blocking work to the logging path.
 
 - Added a "How a record flows" section to the README with a Mermaid diagram of the
   full path of a record, from the logging call to disk writes and background retention.
+- Added a default column to the configuration table and a "Configuration impact"
+  section with the effect, cost, and trade-off of each setting, plus measured costs.
 
 ### Tests
 

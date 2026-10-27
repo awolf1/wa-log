@@ -434,27 +434,73 @@ where `catch` was called.
 
 ### Configuration
 
-| Function | Description | Returns |
-| --- | --- | --- |
-| `setLevel(show, save)` | Sets the minimum console and file levels | `void` |
-| `setDir(dir)` | Creates and selects the log directory | `boolean` |
-| `setPathPrint(print)` | Shows or hides the full source path in the terminal | `void` |
-| `setFilePrint(print)` | Shows or hides the filename when full-path output is disabled | `void` |
-| `setObjectPrint(print)` | Shows or hides the payload in the terminal; files, history, and events are unchanged | `void` |
-| `setConsolePrint(print)` | Controls native pass-through for captured `console.*` calls | `void` |
-| `setStackDepth(frames)` | Limits retained stack frames; a value below 1 restores the runtime default | `void` |
-| `setSanitizePrint(sanitize)` | Removes or permits control characters received in content | `void` |
-| `setRedact(keys)` | Recursively masks the specified payload keys; an empty list disables redaction | `void` |
-| `setCollapseRepeats(collapse)` | Collapses equivalent consecutive records | `void` |
-| `setRateLimit(perSecond)` | Sets the maximum accepted records per second; `0` disables it | `void` |
-| `setRotateSize(bytes)` | Sets the maximum size of a daily part; `0` disables rotation | `void` |
-| `setPurgeDays(days)` | Sets age-based retention; `0` disables the rule and runs a purge pass | `number` |
-| `setPurgeSize(bytes)` | Sets the directory size budget; `0` disables the rule and runs a purge pass | `number` |
-| `setPurgeFiles(count)` | Sets the maximum number of log files, the current one included; `0` disables the rule and runs a purge pass | `number` |
-| `setCatchCrashes(enabled)` | Installs or removes fatal process error handlers | `boolean` |
-| `flush()` | Immediately writes pending queues and counters | `void` |
-| `purge()` | Immediately applies the configured retention rules, synchronously | `number` |
-| `purgeAsync()` | Applies the configured retention rules without blocking the process | `Promise<number>` |
+| Function | Description | Default | Returns |
+| --- | --- | --- | --- |
+| `setLevel(show, save)` | Sets the minimum console and file levels | `INFO`, `TRACE` | `void` |
+| `setDir(dir)` | Creates and selects the log directory | `./logs` | `boolean` |
+| `setPathPrint(print)` | Shows or hides the full source path in the terminal | `true` | `void` |
+| `setFilePrint(print)` | Shows or hides the filename when full-path output is disabled | `true` | `void` |
+| `setObjectPrint(print)` | Shows or hides the payload in the terminal; files, history, and events are unchanged | `false` | `void` |
+| `setConsolePrint(print)` | Controls native pass-through for captured `console.*` calls | `true` | `void` |
+| `setStackDepth(frames)` | Keeps the call site plus this many frames; a value below 1 restores the runtime default | runtime (7 frames) | `void` |
+| `setSanitizePrint(sanitize)` | Removes or permits control characters received in content | `true` | `void` |
+| `setRedact(keys)` | Recursively masks the specified payload keys; an empty list disables redaction | off | `void` |
+| `setCollapseRepeats(collapse)` | Collapses equivalent consecutive records | `false` | `void` |
+| `setRateLimit(perSecond)` | Sets the maximum accepted records per second; `0` disables it | `0` (off) | `void` |
+| `setRotateSize(bytes)` | Sets the maximum size of a daily part; `0` disables rotation | `0` (off) | `void` |
+| `setPurgeDays(days)` | Sets age-based retention; `0` disables the rule and runs a purge pass | `0` (off) | `number` |
+| `setPurgeSize(bytes)` | Sets the directory size budget; `0` disables the rule and runs a purge pass | `0` (off) | `number` |
+| `setPurgeFiles(count)` | Sets the maximum number of log files, the current one included; `0` disables the rule and runs a purge pass | `0` (off) | `number` |
+| `setCatchCrashes(enabled)` | Installs or removes fatal process error handlers | `false` | `boolean` |
+| `flush()` | Immediately writes pending queues and counters | | `void` |
+| `purge()` | Immediately applies the configured retention rules, synchronously | | `number` |
+| `purgeAsync()` | Applies the configured retention rules without blocking the process | | `Promise<number>` |
+
+### Configuration impact
+
+What each setting changes beyond its description, what it costs, and what it gives
+up. The costs refer to the measurements in the next table.
+
+| Setting | Effect | Cost | Trade-off or risk |
+| --- | --- | --- | --- |
+| `setLevel` | Decides what reaches the terminal and the file | A record below the save level skips serialization and the disk write | With the default save level `TRACE`, every record is written to disk. Raising the levels does not avoid stack capture: every call still builds a full record for the history and listeners |
+| `setDir` | Selects where files go | Creates the directory once; when a retention rule is set, the next write schedules a background pass | On failure it falls back to `./logs` silently; only the `false` return tells |
+| `setPathPrint`, `setFilePrint` | Terminal layout only | None measurable | None: files, history, and events always keep the full path |
+| `setObjectPrint` | Adds the payload to the terminal output | `util.inspect` per displayed record, growing with the payload | Large payloads flood the terminal |
+| `setConsolePrint` | Native output of captured `console.*` calls | One extra native print per call | With `true`, a captured call can appear twice: native and formatted |
+| `setStackDepth` | Size of the `stack` field | Fewer frames, less capture work | The call site (`local`, `cursor`) is always kept, but deeper frames are lost for diagnosis |
+| `setSanitizePrint` | Strips control characters from names and messages in the terminal | None measurable | With `false`, logged content can repaint the terminal or forge log lines |
+| `setRedact` | Masks keys in the terminal, file, history, and listeners | When enabled, the payload is copied on every record, matched or not, up to eight levels deep; negligible for small payloads, significant for large ones | Matches keys only; a secret inside `message` is not masked |
+| `setCollapseRepeats` | Folds consecutive records with the same level, name, and message | A folded record still pays stack capture, but skips everything after it | Payloads are not compared: only the first record and a summary carrying the last payload are kept, so intermediate payloads are lost. The summary arrives with the next different record, `flush`, or process exit |
+| `setRateLimit` | Caps accepted records per second | A rejected record still pays stack capture, but skips everything after it | Rejected records are lost everywhere: file, terminal, history, and listeners. The `WARN` with the dropped total arrives with the first record of a later second, `flush`, or process exit |
+| `setRotateSize` | Splits a day into parts | None measurable per record; one directory listing on the first write of each day or directory | Each new part triggers a retention pass. A single record larger than the limit still exceeds it, alone in its part |
+| `setPurgeDays`, `setPurgeSize`, `setPurgeFiles` | Delete old log files | The setter runs a synchronous pass that lists the directory and stats each file; automatic passes run in the background | Deletion is permanent. All three are off by default |
+| `setCatchCrashes` | Records `uncaughtException` and `unhandledRejection` as `FATAL` | None until a crash | Changes process behavior: without another handler the library exits with code 1; with one, the application handler keeps control |
+
+Measured cost per record, as the median of five runs of 20,000 records each, called
+15 functions deep, with file writes included. Measured with Node.js 22 on a Linux
+container (Intel Xeon 2.8 GHz, 4 vCPU). The runs varied by about 15%: compare the
+rows with each other rather than reading them as absolute values.
+
+| Scenario | Cost per record |
+| --- | --- |
+| Baseline: file on, terminal off, 73-byte payload | ~30 µs |
+| Record below the save level, so no file write | ~20 µs |
+| `setStackDepth(1)` | ~25 µs |
+| Terminal line, stdout redirected to `/dev/null` | ~43 µs |
+| Terminal line with `setObjectPrint(true)` | ~52 µs |
+| `setSanitizePrint(false)` | no measurable difference |
+| `setRedact` with a 73-byte payload | no measurable difference |
+| 11 KB payload (200 keys) | ~120 µs |
+| 11 KB payload with `setRedact` | ~305 µs |
+| Record folded by `setCollapseRepeats` | ~19 µs |
+| Record rejected by `setRateLimit` | ~16 µs |
+| `setRotateSize(1 MB)` | no measurable difference |
+| Synchronous purge pass over 5,000 files (`setPurge*`, `purge`) | ~40 ms per pass |
+| Logging call that triggers an automatic purge over 5,000 files | under 2 ms |
+
+The terminal rows exclude the terminal's own rendering, which depends on where
+stdout goes.
 
 ### History and reading
 
@@ -581,6 +627,9 @@ precedence. Invalid values are ignored.
 | `WA_LOG_REDACT` | comma-separated key names | `setRedact` |
 | `WA_LOG_CATCH_CRASHES` | boolean | `setCatchCrashes` |
 
+Each variable has the same default, effect, and cost as its setter; see
+[Configuration impact](#configuration-impact).
+
 Booleans accept `true`, `false`, `1`, `0`, `yes`, `no`, `on`, and `off`, without
 case sensitivity. Size suffixes are also case-insensitive.
 
@@ -603,7 +652,8 @@ node app.js
 - In-memory history keeps at most 100 records.
 - The array returned by `getLatestLogs` is a copy, but its records are references.
 - The write queue is bounded and drains automatically.
-- `setStackDepth(1)` reduces capture work when only the call site is needed.
+- `setStackDepth(1)` reduces capture work when only the call site is needed; see
+  [Configuration impact](#configuration-impact) for measured costs.
 - Raising the file threshold reduces disk writes, but records are still created for
   in-memory history and event listeners.
 - `getLogs` reads and parses files synchronously; avoid broad ranges in a request's
