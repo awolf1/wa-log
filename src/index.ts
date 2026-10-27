@@ -203,9 +203,10 @@ class Log {
     }
 
     /**
-     * How many stack frames a log keeps beyond the call site. Formatting a frame costs
-     * around 2.5 us, which makes this the strongest speed lever in the library: going
-     * from the 6 frames of the default down to 1 nearly halves the cost of a log.
+     * How many stack frames a log keeps beyond the call site. Every frame is captured
+     * and formatted on each call, around 1.4 us apiece on Node 22: going from the 6
+     * frames of the default down to 1 cuts roughly a quarter of the cost of a log made
+     * deep in the call stack. The README section "Configuration impact" has the figures.
      * @param frames Frames to keep, 1 or more. Any other value restores the runtime default.
      */
     public static setStackDepth(frames: number) {

@@ -486,7 +486,7 @@ rows with each other rather than reading them as absolute values.
 | --- | --- |
 | Baseline: file on, terminal off, 73-byte payload | ~30 µs |
 | Record below the save level, so no file write | ~20 µs |
-| `setStackDepth(1)` | ~25 µs |
+| `setStackDepth(1)` | ~23 µs |
 | Terminal line, stdout redirected to `/dev/null` | ~43 µs |
 | Terminal line with `setObjectPrint(true)` | ~52 µs |
 | `setSanitizePrint(false)` | no measurable difference |
